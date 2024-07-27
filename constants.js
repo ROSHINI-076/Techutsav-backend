@@ -8,8 +8,8 @@ export const minioConfig = {
     endPoint: 'play.min.io',
     port: 9000,
     useSSL: true,
-    accessKey: 'ps8SbUQvMrNfabgF6leS',
-    secretKey: 'KfuAxEvz5AanpWhP66bKL9GCKT4eIRymRagbLD6L'
+    accessKey: 'SqoS3aiRoU2cNZY1u2rA',
+    secretKey: '0M1wuhM9s3x8tMc7MaNirVYYRGLrZT9JD8ffKiNb'
   };
 
 export const Bucket = "lms";

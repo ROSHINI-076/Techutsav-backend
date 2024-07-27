@@ -2,6 +2,7 @@ import { standardResponse } from "../helper/helper.js";
 import { CourseModel } from "../models/CourseModel.js";
 import { TeacherModel } from "../models/TeacherModel.js";
 import { StudentModel } from "../models/Studentmodel.js";
+import e from "express";
 
 export const createCourse = async (req, res) => {
     try{
@@ -242,6 +243,46 @@ export const addStudentToCourseBulk = async (req, res) => {
         return res
         .status(500)
         .json(standardResponse(500, "Error Adding Student to Course", null));
+    }
+}
+
+export const getLeaderBoard = async (req, res) => {
+    try{
+        const {level, CourseId} = req.query;
+        if (!CourseId){
+            const leaderboard = await StudentModel.aggregate([
+                {
+                 $match: {"isVerified": true}   
+                },
+                {
+                  $addFields: {
+                    OverallPoints: { $avg: "$Courses.points" }
+                  }
+                },
+                {
+                    $project: { Name: 1, OverallPoints: 1, _id: 0}
+                },
+                {
+                  $sort: { OverallPoints: -1 }
+                }
+              ]);
+            return res
+            .status(200)
+            .json(standardResponse(200, "Leaderboard Found", leaderboard));
+        }
+        else{
+            const leaderboard = await StudentModel.find({"Courses.courseId": CourseId, "Courses.level": parseInt(level)}).sort({"Courses.points": -1}).select("Name Courses.points -_id");
+            return res
+            .status(200)
+            .json(standardResponse(200, "Leaderboard Found", leaderboard));
+        }
+
+    }
+    catch(error){
+        console.log("Error in getting leaderboard", error);
+        return res
+        .status(500)
+        .json(standardResponse(500, "Error Getting Leaderboard", null));
     }
 }
 

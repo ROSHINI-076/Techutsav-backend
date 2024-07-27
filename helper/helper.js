@@ -34,9 +34,10 @@ export const sendOTP = function (email, OTP){
 	try{
 		const transporter = createTransport({
 			service: 'gmail',
+			host: 'smtp.gmail.com',
 			auth: {
 				user: 'insaneonai@gmail.com',
-				pass: 'objb xcre khvv xlxm'
+				pass: 'roos zoeo gpcw rjrj'
 			}
 		});
 
@@ -61,14 +62,14 @@ export const sendOTP = function (email, OTP){
 
 		transporter.sendMail(message, (error, data) => {
 			if (error){
-				throw `Couldn't send Email to ${email}.`;
+				console.log(`Couldn't send Email to ${email}.`, error);
 			}
 			transporter.close()
 		})
 	}
 
 	catch (error){
-		throw `Couldn't send OTP`;
+		return 500
 	}
 }
 
@@ -76,9 +77,10 @@ export const sendVerificationLink = function (email, authCode) {
 	try {
 		const transporter = createTransport({
 			service: 'gmail',
+			host: 'smtp.gmail.com',
 			auth: {
 				user: 'insaneonai@gmail.com',
-				pass: 'objb xcre khvv xlxm'
+				pass: 'roos zoeo gpcw rjrj'
 			}
 		});
 
@@ -104,13 +106,13 @@ export const sendVerificationLink = function (email, authCode) {
 
 		transporter.sendMail(message, (error, data) => {
 			if (error){
-				throw `Couldn't send Email to ${email}.`;
+				console.log(`Couldn't send Email to ${email}.`);
 			}
 			transporter.close()
 		})
 	}
 	catch (error) {
-		throw `Couldn't send Email`;
+		return 500;
 	}
 };
 
@@ -123,6 +125,64 @@ export const generateAuthToken = (data, secret) => {
 		throw "Error signing jwt.";
 	}
 };
+
+export const predictLearnerLevel = (payload) => {
+	try{
+		/*
+		const res = await fetch("https://tlb-tce-model-server.onrender.com/predict/", {
+			method: "POST",
+			body: JSON.stringify(payload),
+			headers: {
+				"Content-Type": "application/json",
+				"Response-Type": "application/json"
+			},
+		});
+		return res.json();*/
+		const {correctRatio, incorrectType, timetaken, questionCount} = payload;
+		
+		if (correctRatio > 0.8){
+			if (timetaken < 40 * questionCount){
+				return 'quick learner';
+			}
+			else{
+				return 'average learner';
+			}
+		}
+		else if (correctRatio >= 0.5){
+			if (incorrectType == "conceptual"){
+				return 'average learner';
+			}
+			else if (incorrectType == "application"){
+				if (timetaken < 60 * questionCount){
+                	return 'average learner'
+				}
+				else{
+					return 'slow learner'
+				}
+			}
+			else{
+				return 'slow learner';
+			}
+		}
+		else{
+			if (incorrectType == 2){
+				if (timetaken > 60 * questionCount){
+					return 'slow learner';
+				}
+				else{
+					return 'average learner';
+				}
+			}
+			else{
+				return 'slow learner';
+			}
+		}
+
+	}
+	catch(error){
+		return null;
+	}
+}
 
 export const VerifyAuthToken = (token, secret) => {
 	try{

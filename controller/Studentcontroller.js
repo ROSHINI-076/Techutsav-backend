@@ -96,6 +96,11 @@ export const resendAuthCodeStudent = async (req, res) => {
     try {
         const {email} = req.body;
         const existingUser = await StudentModel.findOne({'email': email});
+        if (!existingUser){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Email not found. Please check your email address or sign up for a new account."));
+        }
         if (!existingUser.isVerified){
             existingUser.authCode = generateAuthToken({"id": existingUser._id}, constants.authSecret);
             await existingUser.save();
@@ -104,13 +109,28 @@ export const resendAuthCodeStudent = async (req, res) => {
             .json(standardResponse(200,"Authentication code successfully resent. Please check your email for the new code."));
         }
         return res
-        .status(500)
-        .json(standardResponse(500, "Failed to send authentication code. Please try again later."));
+        .status(403)
+        .json(standardResponse(403, "The user is already Verified"));
     }
     catch (error){
+        console.log(error);
         return res
         .status(500)
         .json(standardResponse(500, "Failed to send authentication code. Please try again later."));
+    }
+};
+
+export const loginStudentDefaultNext = async (req, res, next) => {
+    try{
+        return res
+        .status(200)
+        .json(standardResponse(200, "Successfully logged in.", res.locals.userObject));
+    }
+    catch(error){
+        console.log(error);
+        return res
+        .status(422)
+        .json(standardResponse(422, "Unable to process request. Please check the request data and try again."));
     }
 };
 
@@ -144,7 +164,7 @@ export const loginStudent = async (req, res, next) => {
                 const AuthEmail = authEmailHasher(email);
                 res.cookie("Authentication",{LoginToken: LoginToken},{expires: new Date(Date.now() + 86400000), httpOnly:true, secure:true});
                 res.cookie("Authemail", AuthEmail, {expires: new Date(Date.now() + 86400000), httpOnly:true, secure:true});
-                const userObject = {"Name": existingUser.Name, "email": existingUser.email, "Department": existingUser.department};
+                const {_id, HashEmail, password, accessToken, authCode, isVerified, OTP, createdAt, updatedAt, __v, ...userObject} = existingUser.toJSON();
                 return res
                 .status(200)
                 .json(standardResponse(200, "Logged In successfully", userObject));
@@ -159,8 +179,10 @@ export const loginStudent = async (req, res, next) => {
                 .status(403)
                 .json(standardResponse(403, "Unauthorized request. You do not have permission to access this resource.",{authorized: false}));
             }
+            const existingUser = await StudentModel.findOne({"accessToken": isLoginValid.accessToken});
+            const {_id, HashEmail, password, accessToken, authCode, isVerified, OTP, createdAt, updatedAt, __v, ...userObject} = existingUser.toJSON();
+            res.locals.userObject = userObject;
             next();
-
         }
     }
     catch (error) {
@@ -205,7 +227,12 @@ export const getOTPStudent = async (req, res ) =>{
         };
         existingUser.OTP = generateOTP();
         await existingUser.save();
-        sendOTP(existingUser.email, existingUser.OTP);
+        const response = sendOTP(existingUser.email, existingUser.OTP);
+        if (response === 500){
+            return res
+            .status(500)
+            .json(standardResponse(500, "Unable to send OTP. Please try again later."));
+        }
         return res
         .status(200)
         .json(standardResponse(200,"OTP sent Successfully."));
@@ -223,6 +250,30 @@ export const TrueResponse = async (req, res) => {
     return res
     .status(200)
     .json(standardResponse(200, "Request is Valid"));
+}
+
+export const setPreference = async (req, res) => {
+    try{
+        const {Authemail} = req.cookies;
+        const {preference} = req.body;
+        const student = await StudentModel.findOne({"HashEmail": Authemail});
+        if (!student){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Student Invalid. Please check the student id and try again."));
+        }
+        student.preference = preference;
+        await student.save();
+        return res
+        .status(200)
+        .json(standardResponse(200, "Preferences Set Successfully"));
+    }
+    catch(error){
+        console.log(error)
+        return res
+        .status(500)
+        .json(standardResponse(500, "Error Setting Preferences"));
+    }
 }
 
 export const isOTPValidStudent = async (req, res, next) => {
@@ -276,6 +327,29 @@ export const resetPasswordStudent = async (req, res) => {
     }
 };
 
+export const updateElements = async (req, res) =>{
+    try{
+        const {Authemail} = req.cookies;
+        const {coins, hearts, keys} = req.body;
+        const student = await StudentModel.findOneAndUpdate({"HashEmail": Authemail}, {"$set": {"totalCoins": coins, "hearts": hearts, "totalKey": keys}});
+        if (!student){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Student Invalid. Please check the student id and try again."));
+        }
+        return res
+        .status(200)
+        .json(standardResponse(200, "Coins Updated Successfully"));
+
+    }
+    catch(error){
+        console.log(error);
+        return res
+        .status(422)
+        .json(standardResponse(422, "Unable to process request. Please check the request data and try again."));
+    }
+}
+
 export const joinCourse = async (req, res) => {
     try{
         const {Authemail} = req.cookies;
@@ -287,6 +361,11 @@ export const joinCourse = async (req, res) => {
             .status(404)
             .json(standardResponse(404, "Student Invalid. Please check the student id and try again."));
         }
+        if (student.Courses.some((course) => course.toJSON().courseId === courseId)){
+            return res
+            .status(409)
+            .json(standardResponse(409, "You are already in course. Please check the course id and try again."));
+        }
         if (!course){
             return res
             .status(404)
@@ -295,9 +374,18 @@ export const joinCourse = async (req, res) => {
         if (course.Students.includes(student._id)){
             student.Courses.push({id: course._id, courseId: courseId, points: 0, level: 0});
             await student.save();
+            const courses = student.Courses;
+            const courseInfo = await CourseModel.find({"_id": {$in: courses.map((course) => course.toJSON().id.toString())}}, {"_id": 0, "createdAt": 0, "updatedAt": 0, "__v": 0, "Students": 0});
+            const data = {"Courses": courses, "CourseInfo": courseInfo};
             return res
             .status(200)
-            .json(standardResponse(200, "Student added to course successfully."));
+            .json(standardResponse(200, "Student added to course successfully.", data));
+        }
+        else{
+            return res
+            .status(403)
+            .json(standardResponse(403, "Course is not open for enrollment. Please check the course id and try again."));
+        
         }
     }
     catch(error){
@@ -348,7 +436,7 @@ export const Authvalid = async (req, res) => {
     }
 };
 
-export const generate = (req, res) => {
+export const checkvalidity = (req, res) => {
     try {
         res.status(200).json(standardResponse(200, "Successfully loggedin and accessed."));
     }
@@ -356,3 +444,38 @@ export const generate = (req, res) => {
         res.status(400).json(standardResponse(400, "Couldn't make through it."))
     }
 };
+
+export const AddTodo = async (req, res) => {
+    try{
+        const {Authemail} = req.cookies;
+        const {todo} = req.body;
+        const student = await StudentModel.findOne({"HashEmail": Authemail});
+
+        if (!student){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Student Invalid. Please check the student id and try again."));
+        }
+
+        if (student.Todo.includes(todo)){
+            return res
+            .status(409)
+            .json(standardResponse(409, "Todo already exists"));
+        }
+
+        student.Todo.push(todo);
+
+        await student.save();
+
+        return res
+        .status(200)
+        .json(standardResponse(200, "Todo Added Successfully", student.Todo));
+    }
+
+    catch(error){
+        console.log(error);
+        return res
+        .status(500)
+        .json(standardResponse(500, "Error Adding Todo"));
+    }
+}

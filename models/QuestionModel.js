@@ -14,7 +14,7 @@ const QuestionSchema = new Schema({
     questionByLevel : {type: Number, enum: [0,1]}, // [0: "Conceptual", 1: "Applied"]
     Difficulty: {type: String, enum: ["Easy", "Average", "Hard"], required:"difficulty required"},
     hasimg: {type: Boolean, required: "Has Img is required"},
-    point: {type: Number, required: "Points is Required"},
+    point: {type: Number, required: "Points is Required", default: 1},
     answerOption: {type: Number},
     answerDescription: {type: String},
     imgsrc: {type: String, default: ""}, 

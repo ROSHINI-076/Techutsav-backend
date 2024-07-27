@@ -11,7 +11,7 @@ const userSchema = new Schema({
     regno: {type: String, required: "Regno Required"},
     department: {type: String, required: "Department Required"},
     totalCoins: {type: Number, default: 0},
-    hearts: {type: Number, default: 0},
+    hearts: {type: Number, default: 0, max: 5},
     totalKey: {type: Number, default:0},
     Courses: [{type: Map, of: [String]}],  // CourseId: [Points, Level];
     preferenceId: {type: Schema.Types.ObjectId, ref: "Preferences"},
@@ -22,6 +22,8 @@ const userSchema = new Schema({
     accessToken: {type: String, default: "", unique:false},
     authCode: {type: String, default:"", unique:false},
     isVerified: {type: Boolean, default: false},
+    OverallPoints: {type: Number, default: 0},
+    Todo: [{type: String}, {unique: true}],
     OTP: {type: Number}
 },{timestamps: true})
 

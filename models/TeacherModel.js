@@ -17,7 +17,7 @@ const TeacherSchema = new Schema({
     authCode: {type: String, default:"", unique:false},
     isVerified: {type: Boolean, default: false},
     OTP: {type: Number}
-});
+}, {timestamps: true});
 
 TeacherSchema.pre("save", async function (next) {
     const user = this;

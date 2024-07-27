@@ -6,22 +6,23 @@ import { MaterialModel } from '../models/MaterialModel.js';
 import { AssignmentModel } from '../models/AssignmentModel.js';
 import { QuestionModel } from '../models/QuestionModel.js';
 import { SubmissionModel } from '../models/AssignmentSubmission.js';
-import { standardResponse } from '../helper/helper.js';
+import { predictLearnerLevel, standardResponse } from '../helper/helper.js';
 import { minioConfig, Bucket } from '../constants.js';
 import * as Minio from 'minio'
+import { QuizSubmissionModel } from '../models/QuizSubmission.js';
+import { LockedMaterialModel } from '../models/LockedMaterialModel.js';
 
 const minioClient = new Minio.Client(minioConfig);
 
-const TopicSampler = async (difficulty, CourseId, limit) =>
+const TopicSampler = async (difficulty, CourseId, limit, studentId) =>
     {
-    const courseTopics = await CourseModel.findOne({"CourseId": CourseId}, {"_id": 0, "Students": 0, "updatedAt": 0, "createdAt": 0, "__v": 0}).populate({
+    let courseTopics = await CourseModel.findOne({"CourseId": CourseId}, {"Students": 0, "updatedAt": 0, "createdAt": 0, "__v": 0}).populate({
     path: "Topics",
-    select:  ["-_id", "-updatedAt", "-createdAt", "-__v"],
+    select:  ["-createdAt", "-__v"],
     populate: [
         {
             path: "Material",
             model: "Material",
-            match: {"Difficulty": difficulty},
             sampleSize: limit,
             random: true,
             select: ["-_id", "-updatedAt", "-createdAt", "-__v"]
@@ -40,19 +41,52 @@ const TopicSampler = async (difficulty, CourseId, limit) =>
             match: {"Difficulty": difficulty},
             sampleSize: limit,
             random: true,
-            select:  ["-_id", "-updatedAt", "-createdAt", "-__v"]
+            select:  ["-updatedAt", "-createdAt", "-__v", "-answerOption", "-answerDescription"]
+        },
+        {
+            path: "LockedMaterial",
+            model: "LockedMaterial",
+            select: ["-updatedAt", "-createdAt", "-__v"]
         }
     ]
     });
+
+    courseTopics = courseTopics.toJSON();
+
+    const quizAttemptedPromises = courseTopics.Topics.map(async (topic) => {
+        const isAttempted = await isQuizAttempted(topic._id, studentId);
+        return { ...topic, quizAttempted: isAttempted };
+    });
+
+    courseTopics.Topics = courseTopics.Topics.map((topic) => {
+        topic.LockedMaterial = topic.LockedMaterial.map((material) => {
+            const accessTo = material.accessTo.map(String);
+            if (accessTo.includes(studentId.toString())){
+                return {...material, accessTo: accessTo.includes(studentId.toString())};
+            }
+            else{
+                return {...material, URL: null, accessTo: false};
+            }
+        });
+        return topic;
+    });
+    
+    courseTopics.Topics = await Promise.all(quizAttemptedPromises);
+
     return courseTopics
 }
 
 export const createTopics = async (req, res) => {
     try {
         const { Name, courseId, materialDifficulty, assignmentDifficulty } = req.body;
-        const { Assignment, Material } = req.files;
+        const { Assignment, Material, LockedMaterial } = req.files;
         const { Authemail } = req.cookies;
         const teacher = await TeacherModel.findOne({ "HashEmail": Authemail }, { "_id": 0, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0 }).populate("Courses", "CourseId");
+        if (!teacher) {
+            return res
+                .status(404)
+                .json(standardResponse(404, "You dont have access or Teacher not found.", null));
+        }
         const containCourse = teacher.Courses.some((course) => course.CourseId == courseId);
         if (!containCourse) {
             return res
@@ -88,6 +122,7 @@ export const createTopics = async (req, res) => {
                     return err;
                 }
                 const newAssignment = new AssignmentModel({
+                    Name: assignment.originalname,
                     URL: presignedUrl,
                     Difficulty: assignmentDifficulty
                 });
@@ -103,6 +138,7 @@ export const createTopics = async (req, res) => {
                     return err;
                 }
                 const newMaterial = new MaterialModel({
+                    Name: material.originalname,
                     URL: presignedUrl,
                     Difficulty: materialDifficulty
                 });
@@ -111,7 +147,23 @@ export const createTopics = async (req, res) => {
             })
         });
 
-        await Promise.all([...assignmentPromises, ...materialPromises]);
+        const LockedMaterialPromises = LockedMaterial.map(async (material) => {
+            await minioClient.putObject(Bucket, material.originalname, material.buffer);
+            minioClient.presignedUrl('GET', Bucket, material.originalname, function(err, presignedUrl) {
+                if (err) {
+                    return err;
+                }
+                const newLockedMaterial = new LockedMaterialModel({
+                    Name: material.originalname,
+                    URL: presignedUrl,
+                    accessTo: []
+                });
+                newLockedMaterial.save();
+                newTopic.LockedMaterial.push(newLockedMaterial._id);
+            })
+        });
+
+        await Promise.all([...assignmentPromises, ...materialPromises, ...LockedMaterialPromises]);
         
         await newTopic.save();
         course.Topics.push(newTopic._id);
@@ -170,7 +222,7 @@ export const getMyTopicsStudent = async (req, res) => {
     try {
         const { Authemail } = req.cookies;
         const { CourseId } = req.body;
-        const student = await StudentModel.findOne({ "HashEmail": Authemail }, { "_id": 0, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0 });
+        const student = await StudentModel.findOne({ "HashEmail": Authemail }, { "_id": 1, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0 });
         if (!student) {
             return res
                 .status(404)
@@ -179,6 +231,7 @@ export const getMyTopicsStudent = async (req, res) => {
         const course = student.Courses.filter((course) => {
             return course.CourseId !== CourseId;
         })[0];
+
         if (course) {
             let learnerLevel = course.level; // Slow, Average, Fast Learner;
             const courseTopicsByDifficulty = {};
@@ -186,37 +239,37 @@ export const getMyTopicsStudent = async (req, res) => {
                 if (learnerLevel === 0) {
                     // Slow Learner
                     if (difficulty === "Easy") {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 8).Topics;
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 8, student._id).Topics;
                     }
                     else if (difficulty === "Average") {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 2).Topics;
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 2, student._id).Topics;
                     }
                     else {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 0).Topics;
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 0, student._id).Topics;
                     }
                 }
                 else if (learnerLevel === 1) {
                     // Average Learner
                     if (difficulty === "Easy") {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4);
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4, student._id);
                     }
                     else if (difficulty === "Average") {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4);
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4, student._id);
                     }
                     else {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 2);
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 2, student._id);
                     }
                 }
                 else {
                     // Fast Learner
                     if (difficulty === "Easy") {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 2);
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 2, student._id);
                     }
                     else if (difficulty === "Average") {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4);
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4, student._id);
                     }
                     else {
-                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4);
+                        courseTopicsByDifficulty[difficulty] = await TopicSampler(difficulty, CourseId, 4, student._id);
                     }
                 }
             }
@@ -255,6 +308,26 @@ export const getMyTopicsStudent = async (req, res) => {
     }
 }
 
+export const getSubmittedAssignments = async (req, res) => {
+    try {
+        const {Authemail} = req.cookies;
+        const student = await StudentModel.findOne({"HashEmail": Authemail}, {"_id": 1});
+        if (!student){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Student not found", null));
+        }
+        const submission = await SubmissionModel.find({"studentId": student._id});
+        return res
+        .status(200)
+        .json(standardResponse(200, "Submissions", submission));
+    }
+    catch(error){
+        return res
+        .status(500)
+        .json(standardResponse(500, `Internal Server Error: ${error}`, null));
+    }
+}
 
 export const getMyTopicsTeacher = async (req, res) => {
     try{
@@ -305,8 +378,22 @@ export const addtoTopics = async (req, res) => {
     try{
         const {Authemail} = req.cookies;
         const {courseId, Name, assignmentDifficulty, materialDifficulty} = req.body;
-        const {Material, Assignment} = req.files;
+        let {Material, Assignment, LockedMaterial} = req.files;
+        if (!Material){
+            Material = [];
+        }
+        if (!Assignment){
+            Assignment = [];
+        }
+        if (!LockedMaterial){
+            LockedMaterial = [];
+        }
         const teacher = await TeacherModel.findOne({"HashEmail": Authemail}, {"_id": 0, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0}).populate({path : "Courses", populate:{"path": "Topics", model: "Topics"}});
+        if (!teacher){
+            return res
+            .status(404)
+            .json(standardResponse(404, "You dont have access or Teacher not found.", null));
+        }
         const course = teacher.Courses.filter((course) => course.CourseId == courseId)[0];
         if (!course){
             return res
@@ -319,7 +406,7 @@ export const addtoTopics = async (req, res) => {
             .status(403)
             .json(standardResponse(403, "You can't Modify this Topic", null));
         }
-        const topic = await TopicModel.findOne({"Name": Name}, {"Material": 1, "Assignment": 1});
+        const topic = await TopicModel.findOne({"Name": Name}, {"Material": 1, "Assignment": 1, "LockedMaterial": 1});
         const AssignmentPromises = Assignment.map(async (assignment) => {
             await minioClient.putObject(Bucket, assignment.originalname, assignment.buffer);
             minioClient.presignedUrl('GET', Bucket, assignment.originalname, function(err, presignedUrl) {
@@ -327,6 +414,7 @@ export const addtoTopics = async (req, res) => {
                     return err;
                 }
                 const newAssignment = new AssignmentModel({
+                    Name: assignment.originalname,
                     URL: presignedUrl,
                     Difficulty: assignmentDifficulty
                 });
@@ -341,6 +429,7 @@ export const addtoTopics = async (req, res) => {
                     return err;
                 }
                 const newMaterial = new MaterialModel({
+                    Name: material.originalname,
                     URL: presignedUrl,
                     Difficulty: materialDifficulty
                 });
@@ -348,7 +437,22 @@ export const addtoTopics = async (req, res) => {
                 topic.Material.push(newMaterial._id);
             })
         })
-        await Promise.all([...AssignmentPromises, ...MaterialPromises]);
+        const LockedMaterialPromises = LockedMaterial.map(async (material) => {
+            await minioClient.putObject(Bucket, material.originalname, material.buffer);
+            minioClient.presignedUrl('GET', Bucket, material.originalname, function(err, presignedUrl) {
+                if (err) {
+                    return err;
+                }
+                const newLockedMaterial = new LockedMaterialModel({
+                    Name: material.originalname,
+                    URL: presignedUrl,
+                    accessTo: []
+                });
+                newLockedMaterial.save();
+                topic.LockedMaterial.push(newLockedMaterial._id);
+            })
+        });
+        await Promise.all([...AssignmentPromises, ...MaterialPromises, ...LockedMaterialPromises]);
         await topic.save();
         return res
         .status(200)
@@ -395,6 +499,32 @@ export const removefromTopics = async (req, res) => {
         .json(standardResponse(500, `Internal Server Error: ${error}`, null));
     }
 };
+
+export const unlockMaterial = async (req, res) => {
+    try{
+        const {Authemail} = req.cookies;
+        const {MaterialId} = req.body;
+        const student = await StudentModel.findOne({"HashEmail": Authemail}, {"_id": 1, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0});
+        if (!student){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Student not found", null));
+        }
+        const lockedMaterial = await LockedMaterialModel.findOne({"_id": MaterialId});
+        lockedMaterial.accessTo.push(student._id);
+        student.totalKey -= 1;
+        await student.save();
+        await lockedMaterial.save();
+        return res
+        .status(200)
+        .json(standardResponse(200, "Material Unlocked", null));
+    }
+    catch(error){
+        return res
+        .status(500)
+        .json(standardResponse(500, `Internal Server Error: ${error}`, null));
+    }
+}
 
 export const submitAssignment = async (req, res) => {
     try{
@@ -456,8 +586,8 @@ export const createQuiz = async (req, res) => {
             .json(standardResponse(403, "You can't Modify this Topic", null));
         }
         const questionDocuments = questions.map((question) => {
-            question.timer = timer;
-            question.thresholdTime = thresholdTime;
+            question.Timer = timer;
+            question.ThresholdTime = thresholdTime;
             return question;
         });
         const docs = await QuestionModel.insertMany(questionDocuments);
@@ -473,7 +603,7 @@ export const createQuiz = async (req, res) => {
         await topic.save();
         return res
         .status(200)
-        .json(standardResponse(200, "Quiz Created", null));
+        .json(standardResponse(200, "Quiz Created", questionDocuments));
 
         
     }
@@ -515,3 +645,207 @@ export const removefromQuiz = async (req, res) => {
         .json(standardResponse(500, `Internal Server Error: ${error}`, null));
     }
 };
+
+export const evaluateAssignment = async (req, res) => {
+    try{
+        const {Authemail} = req.cookies;
+        const {CourseId, ResponseId, Marks} = req.body;
+        const teacher = await TeacherModel.findOne({"HashEmail": Authemail}, {"_id": 0, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0}).populate("Courses", "CourseId");
+        if (!teacher){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Teacher not found", null));
+        }
+        const course = teacher.Courses.filter((course) => course.CourseId == CourseId)[0];
+        if (!course){
+            return res
+            .status(403)
+            .json(standardResponse(403, "Invalid Course either the course doesn't exist or you don't have access.", null));
+        }
+        const AssignmentResponse = await SubmissionModel.findOne({"_id": ResponseId});
+        if (!AssignmentResponse){
+            return res
+            .status(404)
+            .json(standardResponse(404, "Assignment Response not found", null));
+        }
+        AssignmentResponse.Marks = Marks;
+        await StudentModel.updateOne(
+            { "_id": AssignmentResponse.studentId, "Courses.courseId": CourseId },
+            { 
+                $inc: {
+                    "Courses.$.points": Marks,
+                    totalCoins: Marks * 10
+                }
+            }
+        );
+        await AssignmentResponse.save();
+        return res
+        .status(200)
+        .json(standardResponse(200, "Assignment Evaluated", null));
+    }
+    catch(error){
+        return res
+        .status(500)
+        .json(standardResponse(500, `Internal Server Error: ${error}`, null));
+    }
+}
+
+export const evaluateQuiz = async (req, res) => {
+    try {
+
+        const { Authemail } = req.cookies;
+        const {answers, topicName, CourseId, tabswitch, timetaken} = req.body;
+        
+        const student = await StudentModel.findOne({ "HashEmail": Authemail }, { "_id": 1, "password": 0, "accessToken": 0, "authCode": 0, "isVerified": 0, "OTP": 0 });
+        if (!student) {
+            return res
+                .status(404)
+                .json(standardResponse(404, "No access to student!", null));
+        }
+        const course = student.Courses.filter((course) => {
+            return course.CourseId !== CourseId;
+        })[0];
+
+        if (!course) {
+            return res
+                .status(403)
+                .json(standardResponse(403, "You don't have access to this course", null));
+        }
+
+        const Questions = await QuestionModel.find({_id : {$in: answers.map(a => a.questionId)}});
+        const topicId = await TopicModel.findOne({Name: topicName}, {"_id": 1});
+
+        let totalMarks = 0;
+
+        let answerResponses = [];
+
+        for (let i = 0; i < answers.length; i++) {
+            if (Questions[i].questionType === 0) {  // MCQ
+                const answerResponse = {};
+                answerResponse.StudentId = student._id;
+                answerResponse.questionId = answers[i].questionId;
+                answerResponse.CourseId = CourseId;
+                answerResponse.TopicId = topicId.toJSON()._id;
+                answerResponse.AnswerMCQ = answers[i].answer;
+                answerResponse.malpractice = tabswitch;
+                if (parseInt(answers[i].answer) === Questions[i].answerOption) {
+                    answerResponse.Score = Questions[i].point;
+                    totalMarks += Questions[i].point;
+                    answers[i].iscorrect = true;
+                }
+                else{
+                answers[i].iscorrect = false;
+                }
+                answerResponses.push(answerResponse);
+            }
+            // Descriptive
+            /*else{
+                if (answers[i].answer === Questions[i].answerOption) {
+                    const answerResponse = {};
+                    answerResponse.StudentId = student._id;
+                    answerResponse.questionId = answers[i].questionId;
+                    answerResponse.AnswerMCQ = answers[i].answer;
+                    totalMarks += Questions[i].point;
+                    answers[i].iscorrect = true;
+                }
+                else{
+                answers[i].iscorrect = false;
+                }
+            }*/
+        }
+
+        const correctRatio = totalMarks / Questions.reduce((acc, curr) => acc + curr.point, 0);
+        const questionCount = answers.length;
+
+        const incorrectFrequency = {"conceptual": 0, "problem solving":0, "application": 0};
+
+        for (let i = 0; i < answers.length; i++) {
+            if (answers[i].iscorrect === false){
+                if (Questions[i].questionByLevel === 0){
+                    incorrectFrequency["conceptual"] += 1;
+                }
+                else if (Questions[i].questionByLevel === 1){
+                    incorrectFrequency["problem solving"] += 1;
+                }
+                else{
+                    incorrectFrequency["application"] += 1;
+                }
+            }
+        }
+
+        const incorrectType =  Object.keys(incorrectFrequency).reduce((a,b) => incorrectFrequency[a] > incorrectFrequency[b] ? a : b);
+
+        const learnerLevelResponse = predictLearnerLevel({correctRatio, incorrectType, timetaken, questionCount});
+
+        const learnerLevelMapping = {"slow learner": 0, "average learner": 1, "quick learner": 2};
+
+        if (learnerLevelResponse){
+            const learnerlevel = learnerLevelMapping[learnerLevelResponse];
+            
+            const prevLevel = course.toJSON().level;
+
+            if (learnerlevel <= prevLevel){
+                await StudentModel.update(
+                    {"_id": student._id, "Courses.courseId": CourseId},
+                    {"$set": {
+                        "Courses.$.level": learnerlevel
+                        },
+                    "$inc": {
+                        "hearts": -1
+                    }
+                    }
+                );
+            }
+            else{
+                await StudentModel.updateOne(
+                    {"_id": student._id, "Courses.courseId": CourseId},
+                    {"$set": {
+                        "Courses.$.level": learnerlevel
+                    }
+                    }
+                );
+            }
+        }
+
+        await QuizSubmissionModel.insertMany(answerResponses);
+
+        await StudentModel.updateOne(
+            { "_id": student._id, "Courses.courseId": CourseId },
+            { 
+                $inc: {
+                    "Courses.$.points": totalMarks
+                }
+            });
+
+        return res
+        .status(200)
+        .json(standardResponse(200, "Quiz Evaluated", {answers, totalMarks}));
+    }
+
+    catch(error) {
+        console.log(error);
+        return res
+        .status(500)
+        .json(standardResponse(500, `Error Check your input.`, null));
+    }
+}
+
+export const isQuizAttempted = async (topicId, studentId) => {
+    try{
+
+        const QuizSubmission = await QuizSubmissionModel.find({"TopicId": topicId, "StudentId": studentId}).populate("questionId", "point");
+
+        if (QuizSubmission.length > 0) {
+            const totalScore = QuizSubmission.reduce((acc, curr) => acc + curr.Score, 0);
+            const totalScorable = QuizSubmission.reduce((acc, curr) => acc + curr.questionId.point, 0);
+            return {isQuizAttempted: true, totalScore: totalScore, totalScorable: totalScorable};
+        }
+        else{
+            return {isQuizAttempted: false};
+        }
+    }
+    catch(error){
+        console.log(error);
+        return {isQuizAttempted: false};
+    }
+}
